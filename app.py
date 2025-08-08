@@ -3,6 +3,7 @@ from fastapi.responses import PlainTextResponse
 import json
 import httpx
 from groq import Groq
+import os
 
 SLACK_BOT_TOKEN =os.getenv("SLACK_BOT_TOKEN")
 client = Groq()
