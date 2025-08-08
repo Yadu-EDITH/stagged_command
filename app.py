@@ -4,7 +4,7 @@ import json
 import httpx
 from groq import Groq
 
-SLACK_BOT_TOKEN = "xoxb-your-token"
+SLACK_BOT_TOKEN =os.getenv("SLACK_BOT_TOKEN")
 client = Groq()
 
 @app.post("/slack-interact")
