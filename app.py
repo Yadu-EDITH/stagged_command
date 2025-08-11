@@ -7,6 +7,7 @@ import hashlib
 import time
 import json
 import httpx
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -123,45 +124,58 @@ async def handle_interaction(request: Request):
             "view": question_modal
         })
 
-    # Stage 2: Process question & respond
+    # Stage 2: Handle question asynchronously
     elif callback_id == "submit_question":
         model = payload["view"]["private_metadata"]
         question = payload["view"]["state"]["values"]["question_block"]["question_action"]["value"]
         user_id = payload["user"]["id"]
 
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": question}],
-                temperature=1,
-                max_completion_tokens=256,
-                top_p=1,
-                stream=True,
-                stop=None
-            )
+        # Run Groq request & message sending in background
+        asyncio.create_task(process_question_async(model, question, user_id))
 
-            response_text = ""
-            for chunk in completion:
-                response_text += chunk.choices[0].delta.content or ""
-
-            response_text = response_text.strip()
-
-            # Send ephemeral answer
-            async with httpx.AsyncClient() as http_client:
-                await http_client.post(
-                    "https://slack.com/api/chat.postEphemeral",
-                    headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                    json={
-                        "channel": user_id,  # ephemeral to user
-                        "user": user_id,
-                        "text": f"*Answer:*\n{response_text}"
-                    },
-                )
-
-        except Exception as e:
-            return PlainTextResponse(f"Error: {str(e)}")
-
-        # Close modal
+        # Close modal immediately so Slack doesn't timeout
         return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("")
+
+# --- Background processing of the question ---
+async def process_question_async(model, question, user_id):
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": question}],
+            temperature=1,
+            max_completion_tokens=256,
+            top_p=1,
+            stream=True,
+            stop=None
+        )
+
+        response_text = ""
+        for chunk in completion:
+            response_text += chunk.choices[0].delta.content or ""
+
+        response_text = response_text.strip()
+
+        async with httpx.AsyncClient() as http_client:
+            await http_client.post(
+                "https://slack.com/api/chat.postEphemeral",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                json={
+                    "channel": user_id,  # ephemeral to user
+                    "user": user_id,
+                    "text": f"*Answer:*\n{response_text}"
+                },
+            )
+
+    except Exception as e:
+        async with httpx.AsyncClient() as http_client:
+            await http_client.post(
+                "https://slack.com/api/chat.postEphemeral",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                json={
+                    "channel": user_id,
+                    "user": user_id,
+                    "text": f"Error: {str(e)}"
+                },
+            )
