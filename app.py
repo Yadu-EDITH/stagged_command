@@ -44,10 +44,12 @@ async def handle_command(request: Request):
     verify_slack_signature(request, body)
     form_data = dict((await request.form()).items())
     trigger_id = form_data.get("trigger_id")
+    channel_id = form_data.get("channel_id")  # ✅ Capture channel ID
 
     modal_view = {
         "type": "modal",
         "callback_id": "select_model",
+        "private_metadata": channel_id,  # ✅ Pass channel ID in metadata
         "title": {"type": "plain_text", "text": "Select Model"},
         "submit": {"type": "plain_text", "text": "Next"},
         "blocks": [
@@ -74,7 +76,6 @@ async def handle_command(request: Request):
         ],
     }
 
-    # Open initial modal
     async with httpx.AsyncClient() as http_client:
         headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
         await http_client.post(
@@ -97,11 +98,12 @@ async def handle_interaction(request: Request):
     # Stage 1: Push question modal
     if callback_id == "select_model":
         selected_model = payload["view"]["state"]["values"]["model_block"]["model_action"]["selected_option"]["value"]
+        channel_id = payload["view"]["private_metadata"]  # ✅ Retrieve channel ID
 
         question_modal = {
             "type": "modal",
             "callback_id": "submit_question",
-            "private_metadata": selected_model,
+            "private_metadata": json.dumps({"model": selected_model, "channel_id": channel_id}),  # ✅ Store both
             "title": {"type": "plain_text", "text": "Ask a Question"},
             "submit": {"type": "plain_text", "text": "Submit"},
             "blocks": [
@@ -118,7 +120,6 @@ async def handle_interaction(request: Request):
             ],
         }
 
-        # Push next modal in same response
         return JSONResponse({
             "response_action": "push",
             "view": question_modal
@@ -126,20 +127,20 @@ async def handle_interaction(request: Request):
 
     # Stage 2: Handle question asynchronously
     elif callback_id == "submit_question":
-        model = payload["view"]["private_metadata"]
+        meta = json.loads(payload["view"]["private_metadata"])  # ✅ Parse both
+        model = meta["model"]
+        channel_id = meta["channel_id"]  # ✅ Extract channel ID
         question = payload["view"]["state"]["values"]["question_block"]["question_action"]["value"]
         user_id = payload["user"]["id"]
 
-        # Run Groq request & message sending in background
-        asyncio.create_task(process_question_async(model, question, user_id))
+        asyncio.create_task(process_question_async(model, question, user_id, channel_id))  # ✅ Pass channel_id
 
-        # Close modal immediately so Slack doesn't timeout
         return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("")
 
 # --- Background processing of the question ---
-async def process_question_async(model, question, user_id):
+async def process_question_async(model, question, user_id, channel_id):
     try:
         completion = client.chat.completions.create(
             model=model,
@@ -157,25 +158,24 @@ async def process_question_async(model, question, user_id):
 
         response_text = response_text.strip()
 
+        # ✅ Post publicly to channel instead of ephemeral
         async with httpx.AsyncClient() as http_client:
             await http_client.post(
-                "https://slack.com/api/chat.postEphemeral",
+                "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
                 json={
-                    "channel": user_id,  # ephemeral to user
-                    "user": user_id,
-                    "text": f"*Answer:*\n{response_text}"
+                    "channel": channel_id,
+                    "text": f"<@{user_id}> asked:\n>{question}\n\n*Answer:*\n{response_text}"
                 },
             )
 
     except Exception as e:
         async with httpx.AsyncClient() as http_client:
             await http_client.post(
-                "https://slack.com/api/chat.postEphemeral",
+                "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
                 json={
-                    "channel": user_id,
-                    "user": user_id,
-                    "text": f"Error: {str(e)}"
+                    "channel": channel_id,
+                    "text": f"Error for <@{user_id}>: {str(e)}"
                 },
             )
